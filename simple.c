@@ -14,6 +14,7 @@
 #include <linux/slab.h>
 #include <linux/random.h>
 #include <linux/version.h>
+#include <linux/uio.h>
 
 #include "super.h"
 
@@ -364,10 +365,24 @@ ssize_t simplefs_write(struct file * filp, const char __user * buf, size_t len,
 
 	int retval;
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 13, 0)
+	struct iovec iov = {.iov_base = (void __user *)buf,.iov_len = len };
+	struct kiocb kiocb;
+	struct iov_iter iter;
+
+	init_sync_kiocb(&kiocb, filp);
+	kiocb.ki_pos = *ppos;
+	iov_iter_init(&iter, WRITE, &iov, 1, len);
+	retval = generic_write_checks(&kiocb, &iter);
+	if (retval < 0) {
+		return retval;
+	}
+#else
 	retval = generic_write_checks(filp, ppos, &len, 0);
 	if (retval) {
 		return retval;
 	}
+#endif
 
 	inode = filp->f_path.dentry->d_inode;
 	sfs_inode = SIMPLEFS_INODE(inode);
@@ -441,10 +456,68 @@ static int simplefs_create(struct inode *dir, struct dentry *dentry,
 static int simplefs_mkdir(struct inode *dir, struct dentry *dentry,
 			  umode_t mode);
 
+static int simplefs_unlink(struct inode *inode, struct dentry *dentry)
+{
+
+	struct simplefs_inode *sfs_inode, *parent_dir_inode;
+	struct simplefs_dir_record *parent_dir_datablock;
+	struct buffer_head *bh;
+	struct simplefs_super_block *sb;
+	int i;
+
+	sfs_inode = SIMPLEFS_INODE(dentry->d_inode);
+	bh = sb_bread(inode->i_sb, sfs_inode->data_block_number);
+	memset(bh->b_data, 0, sfs_inode->file_size);
+	mark_buffer_dirty(bh);
+	sync_dirty_buffer(bh);
+
+	// remove info from parent inode
+	if (mutex_lock_interruptible(&simplefs_directory_children_update_lock)) {
+		sfs_trace("Failed to acquire mutex lock\n");
+		return -EINTR;
+	}
+	parent_dir_inode = SIMPLEFS_INODE(dentry->d_parent->d_inode);
+	bh = sb_bread(inode->i_sb, parent_dir_inode->data_block_number);
+	parent_dir_datablock = (struct simplefs_dir_record *)bh->b_data;
+
+	for (i = 0; i < parent_dir_inode->dir_children_count;
+	     i++, parent_dir_datablock++) {
+		if (!strcmp
+		    (parent_dir_datablock->filename, dentry->d_name.name)) {
+			memset(bh->b_data +
+			       (sizeof(struct simplefs_dir_record) * i), 0,
+			       sizeof(struct simplefs_dir_record));
+			mark_buffer_dirty(bh);
+			sync_dirty_buffer(bh);
+		}
+	}
+	brelse(bh);
+
+	parent_dir_inode->dir_children_count--;
+	simplefs_inode_save(inode->i_sb, parent_dir_inode);
+	mutex_unlock(&simplefs_directory_children_update_lock);
+
+	if (mutex_lock_interruptible(&simplefs_inodes_mgmt_lock)) {
+		sfs_trace("Failed to acquire mutex lock\n");
+		return -EINTR;
+	}
+	sb = SIMPLEFS_SB(inode->i_sb);
+	sb->inodes_count--;
+	sb->free_blocks |= 1 << sfs_inode->data_block_number;
+	simplefs_sb_sync(inode->i_sb);
+
+	memset(sfs_inode, 0, sizeof(struct simplefs_inode));
+	simplefs_inode_save(inode->i_sb, sfs_inode);
+	mutex_unlock(&simplefs_inodes_mgmt_lock);
+
+	return 0;
+}
+
 static struct inode_operations simplefs_inode_ops = {
 	.create = simplefs_create,
 	.lookup = simplefs_lookup,
 	.mkdir = simplefs_mkdir,
+	.unlink = simplefs_unlink,
 };
 
 static int simplefs_create_fs_object(struct inode *dir, struct dentry *dentry,
@@ -494,7 +567,7 @@ static int simplefs_create_fs_object(struct inode *dir, struct dentry *dentry,
 
 	inode->i_sb = sb;
 	inode->i_op = &simplefs_inode_ops;
-	inode->i_atime = inode->i_mtime = inode->i_ctime = CURRENT_TIME;
+	inode->i_atime = inode->i_mtime = inode->i_ctime = current_time(inode);
 	inode->i_ino = (count + SIMPLEFS_START_INO - SIMPLEFS_RESERVED_INODES + 1);
 
 	sfs_inode = kmem_cache_alloc(sfs_inode_cachep, GFP_KERNEL);
@@ -627,7 +700,7 @@ struct dentry *simplefs_lookup(struct inode *parent_inode,
 
 			/* FIXME: We should store these times to disk and retrieve them */
 			inode->i_atime = inode->i_mtime = inode->i_ctime =
-			    CURRENT_TIME;
+			    current_time(inode);
 
 			inode->i_private = sfs_inode;
 
@@ -648,7 +721,7 @@ struct dentry *simplefs_lookup(struct inode *parent_inode,
 /**
  * Simplest
  */
-void simplefs_destory_inode(struct inode *inode)
+void simplefs_destroy_inode(struct inode *inode)
 {
 	struct simplefs_inode *sfs_inode = SIMPLEFS_INODE(inode);
 
@@ -658,7 +731,7 @@ void simplefs_destory_inode(struct inode *inode)
 }
 
 static const struct super_operations simplefs_sops = {
-	.destroy_inode = simplefs_destory_inode,
+	.destroy_inode = simplefs_destroy_inode,
 };
 
 /* This function, as the name implies, Makes the super_block valid and
@@ -710,7 +783,7 @@ int simplefs_fill_super(struct super_block *sb, void *data, int silent)
 	root_inode->i_op = &simplefs_inode_ops;
 	root_inode->i_fop = &simplefs_dir_operations;
 	root_inode->i_atime = root_inode->i_mtime = root_inode->i_ctime =
-	    CURRENT_TIME;
+	    current_time(root_inode);
 
 	root_inode->i_private =
 	    simplefs_get_inode(sb, SIMPLEFS_ROOTDIR_INODE_NUMBER);
