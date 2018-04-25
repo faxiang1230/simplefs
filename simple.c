@@ -466,32 +466,18 @@ static int simplefs_unlink(struct inode *inode, struct dentry *dentry)
 	struct simplefs_inode *sfs_inode, *parent_dir_inode;
 	struct simplefs_dir_record *parent_dir_datablock;
 	struct buffer_head *bh;
+	struct simplefs_super_block *sb;
 	int i;
 
 	sfs_inode = SIMPLEFS_INODE(dentry->d_inode);
-	if (IS_DIR(sfs_inode->mode)) {
-		simplefs_lookup(dentry->d_inode,)
-	}
-	// erase block data
-	printk(KERN_INFO "%s file:%s data block :%u inode number:%u", __func__,
-	       dentry->d_name.name, sfs_inode->data_block_number,
-	       sfs_inode->inode_no);
-
 	bh = sb_bread(inode->i_sb, sfs_inode->data_block_number);
-
 	memset(bh->b_data, 0, sfs_inode->file_size);
 	mark_buffer_dirty(bh);
 	sync_dirty_buffer(bh);
 
 	// remove info from parent inode
 	parent_dir_inode = SIMPLEFS_INODE(dentry->d_parent->d_inode);
-
-	printk(KERN_INFO
-	       "%s remove its parent dir info:%s data block :%u inode number:%u",
-	       __func__, dentry->d_parent->d_name.name,
-	       parent_dir_inode->data_block_number, parent_dir_inode->inode_no);
 	bh = sb_bread(inode->i_sb, parent_dir_inode->data_block_number);
-
 	parent_dir_datablock = (struct simplefs_dir_record *)bh->b_data;
 
 	for (i = 0; i < parent_dir_inode->dir_children_count;
@@ -505,33 +491,18 @@ static int simplefs_unlink(struct inode *inode, struct dentry *dentry)
 			sync_dirty_buffer(bh);
 		}
 	}
-
-	bh = sb_bread(inode->i_sb, SIMPLEFS_INODESTORE_BLOCK_NUMBER);
-	((struct simplefs_inode *)(bh->b_data +
-				   ((parent_dir_inode->inode_no -
-				     1) *
-				    sizeof(struct simplefs_inode))))->
-	    dir_children_count--;
-	mark_buffer_dirty(bh);
-	sync_dirty_buffer(bh);
-
-	printk(KERN_INFO "%s Freeing %u inode metadata, data block:%u\n",
-	       __func__, sfs_inode->inode_no, SIMPLEFS_INODESTORE_BLOCK_NUMBER);
-	bh = sb_bread(inode->i_sb, SIMPLEFS_INODESTORE_BLOCK_NUMBER);
-	memset(bh->b_data +
-	       (sizeof(struct simplefs_inode) * sfs_inode->inode_no), 0,
-	       sizeof(struct simplefs_inode));
-	mark_buffer_dirty(bh);
-	sync_dirty_buffer(bh);
-
-	printk(KERN_INFO "%s Freeing super block inode info, data block:%u\n",
-	       __func__, SIMPLEFS_SUPERBLOCK_BLOCK_NUMBER);
-	bh = sb_bread(inode->i_sb, SIMPLEFS_SUPERBLOCK_BLOCK_NUMBER);
-	((struct simplefs_super_block *)bh->b_data)->inodes_count--;
-	mark_buffer_dirty(bh);
-	sync_dirty_buffer(bh);
-
 	brelse(bh);
+
+	parent_dir_inode->dir_children_count--;
+	simplefs_inode_save(inode->i_sb, parent_dir_inode);
+
+	sb = SIMPLEFS_SB(inode->i_sb);
+	sb->inodes_count--;
+	sb->free_blocks |= 1 << sfs_inode->inode_no;
+	simplefs_sb_sync(inode->i_sb);
+
+	memset(sfs_inode, 0, sizeof(struct simplefs_inode));
+	simplefs_inode_save(inode->i_sb, sfs_inode);
 
 	return 0;
 }
@@ -621,8 +592,6 @@ static int simplefs_create_fs_object(struct inode *dir, struct dentry *dentry,
 		mutex_unlock(&simplefs_directory_children_update_lock);
 		return ret;
 	}
-	printk(KERN_INFO "%s new inode info:num %d data block %d\n",
-	       __func__, sfs_inode->inode_no, sfs_inode->data_block_number);
 	simplefs_inode_add(sb, sfs_inode);
 
 	parent_dir_inode = SIMPLEFS_INODE(dir);
