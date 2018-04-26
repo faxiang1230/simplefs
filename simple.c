@@ -471,7 +471,6 @@ static int simplefs_unlink(struct inode *inode, struct dentry *dentry)
 	mark_buffer_dirty(bh);
 	sync_dirty_buffer(bh);
 
-	// remove info from parent inode
 	if (mutex_lock_interruptible(&simplefs_directory_children_update_lock)) {
 		sfs_trace("Failed to acquire mutex lock\n");
 		return -EINTR;
@@ -482,16 +481,15 @@ static int simplefs_unlink(struct inode *inode, struct dentry *dentry)
 
 	for (i = 0; i < parent_dir_inode->dir_children_count;
 	     i++, parent_dir_datablock++) {
-		if (!strcmp
-		    (parent_dir_datablock->filename, dentry->d_name.name)) {
-			memset(bh->b_data +
-			       (sizeof(struct simplefs_dir_record) * i), 0,
-			       sizeof(struct simplefs_dir_record));
+		if (parent_dir_datablock->inode_no == sfs_inode->inode_no) {
+			for(; i < parent_dir_inode->dir_children_count; i++, parent_dir_datablock++) {
+				memcpy(parent_dir_datablock, parent_dir_datablock + 1, sizeof(struct simplefs_dir_record));
+			}
 			mark_buffer_dirty(bh);
 			sync_dirty_buffer(bh);
+			break;
 		}
 	}
-	brelse(bh);
 
 	parent_dir_inode->dir_children_count--;
 	simplefs_inode_save(inode->i_sb, parent_dir_inode);
@@ -506,9 +504,14 @@ static int simplefs_unlink(struct inode *inode, struct dentry *dentry)
 	sb->free_blocks |= 1 << sfs_inode->data_block_number;
 	simplefs_sb_sync(inode->i_sb);
 
+	kmem_cache_free(sfs_inode_cachep, sfs_inode);
+	free_inode_nonrcu(dentry->d_inode);
 	memset(sfs_inode, 0, sizeof(struct simplefs_inode));
 	simplefs_inode_save(inode->i_sb, sfs_inode);
+	dput(dentry);
 	mutex_unlock(&simplefs_inodes_mgmt_lock);
+
+	brelse(bh);
 
 	return 0;
 }
