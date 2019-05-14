@@ -27,7 +27,72 @@ static inline struct simplefs_inode *SIMPLEFS_INODE(struct inode *inode)
 {                                                                               
         return inode->i_private;                                                    
 }
+const struct file_operations simplefs_reg_operations = { 
+    .llseek     = generic_file_llseek,
+    .read       = do_sync_read,
+    .aio_read   = generic_file_aio_read,
+    .write      = do_sync_write,
+    .aio_write  = generic_file_aio_write,
+    .mmap       = generic_file_mmap,
+    .fsync      = generic_file_fsync,
+    .splice_read    = generic_file_splice_read,
+};
+int simplefs_get_block(struct inode * inode, long block,
+        struct buffer_head *bh_result, int create)
+{       
+    return 0;
+}
+static int simplefs_writepage(struct page *page, struct writeback_control *wbc)
+{
+    return block_write_full_page(page, simplefs_get_block, wbc);
+}
 
+static int simplefs_readpage(struct file *file, struct page *page)
+{
+    return block_read_full_page(page,simplefs_get_block);
+}
+
+int simplefs_prepare_chunk(struct page *page, loff_t pos, unsigned len)
+{
+    return __block_write_begin(page, pos, len, simplefs_get_block);
+}
+
+static void simplefs_write_failed(struct address_space *mapping, loff_t to)
+{
+    struct inode *inode = mapping->host;
+
+    if (to > inode->i_size) {
+        truncate_pagecache(inode, inode->i_size);
+        simplefs_truncate(inode);
+    }
+}
+
+static int simplefs_write_begin(struct file *file, struct address_space *mapping,
+        loff_t pos, unsigned len, unsigned flags,
+        struct page **pagep, void **fsdata)
+{
+    int ret;
+
+    ret = block_write_begin(mapping, pos, len, flags, pagep,
+            simplefs_get_block);
+    if (unlikely(ret))
+        simplefs_write_failed(mapping, pos + len);
+
+    return ret;
+}
+
+static sector_t simplefs_bmap(struct address_space *mapping, sector_t block)
+{
+    return generic_block_bmap(mapping,block,simplefs_get_block);
+}
+
+static const struct address_space_operations simplefs_aops = {
+    .readpage = simplefs_readpage,
+    .writepage = simplefs_writepage,
+    .write_begin = simplefs_write_begin,
+    .write_end = generic_write_end,
+    .bmap = simplefs_bmap
+}; 
 struct super_operations simplefs_sops = {
 //    .alloc_inode = simplefs_alloc_inode,
     .destroy_inode = simplefs_destroy_inode,
