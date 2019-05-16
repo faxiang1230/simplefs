@@ -18,6 +18,7 @@ ssize_t simplefs_read(struct file *filp, char __user *buf, size_t len, loff_t *o
 ssize_t simplefs_write(struct file *filp, const char __user *buf, size_t len, loff_t *offset);
 
 static struct kmem_cache * simplefs_inode_cachep;
+static const struct file_operations empty_fops;
 
 static inline struct simplefs_super_block *SIMPLEFS_SB(struct super_block *sb)
 {                                                                               
@@ -37,9 +38,21 @@ const struct file_operations simplefs_reg_operations = {
     .fsync      = generic_file_fsync,
     .splice_read    = generic_file_splice_read,
 };
-int simplefs_get_block(struct inode * inode, long block,
+int simplefs_get_block(struct inode * inode, sector_t block,
         struct buffer_head *bh_result, int create)
 {       
+    struct super_block *vsb = inode->i_sb; 
+    struct simplefs_super_block *sbi = SIMPLEFS_SB(vsb);
+    struct simplefs_inode *si = (struct simplefs_inode *)inode->i_private;
+
+    //sb_bread(vsb, si->data_block_number);
+    map_bh(bh_result, vsb, si->data_block_number);
+    //bh_result->b_size = si->file_size; 
+
+    printk(KERN_ERR "ino:%lu block:%d create:%d %x\n", inode->i_ino, block, create, bh_result->b_data);
+
+    if (!create)
+        return 0;
     return 0;
 }
 static int simplefs_writepage(struct page *page, struct writeback_control *wbc)
@@ -56,7 +69,7 @@ int simplefs_prepare_chunk(struct page *page, loff_t pos, unsigned len)
 {
     return __block_write_begin(page, pos, len, simplefs_get_block);
 }
-
+#if 0
 static void simplefs_write_failed(struct address_space *mapping, loff_t to)
 {
     struct inode *inode = mapping->host;
@@ -66,7 +79,7 @@ static void simplefs_write_failed(struct address_space *mapping, loff_t to)
         simplefs_truncate(inode);
     }
 }
-
+#endif
 static int simplefs_write_begin(struct file *file, struct address_space *mapping,
         loff_t pos, unsigned len, unsigned flags,
         struct page **pagep, void **fsdata)
@@ -75,8 +88,10 @@ static int simplefs_write_begin(struct file *file, struct address_space *mapping
 
     ret = block_write_begin(mapping, pos, len, flags, pagep,
             simplefs_get_block);
+#if 0
     if (unlikely(ret))
         simplefs_write_failed(mapping, pos + len);
+#endif
 
     return ret;
 }
@@ -109,12 +124,14 @@ struct inode_operations simplefs_inode_operations = {
     .unlink = simplefs_unlink,
 #endif
 };
+#if 0
 struct file_operations simplefs_reg_operations = {
 #if 1
     .read  = simplefs_read,
     .write = simplefs_write,
 #endif
 };
+#endif
 ssize_t simplefs_read(struct file *filp, char __user *buf, size_t len, loff_t *offset)
 {
     struct inode *inode = filp->f_inode;
@@ -282,6 +299,7 @@ int simplefs_create(struct inode *dir, struct dentry *dentry, umode_t mode, bool
     si->mode = mode;
     inode->i_private = si;
     inode->i_op = &simplefs_inode_operations;
+    inode->i_mapping->a_ops = &simplefs_aops;
     inode->i_blocks = 1;
     
     inode->i_mode = mode;
@@ -430,14 +448,14 @@ struct inode *simplefs_iget(struct super_block *s, int ino)
     bh = sb_bread(s, SIMPLEFS_INODESTORE_BLOCK_NUMBER);
     s_inode = ((struct simplefs_inode *)bh->b_data) + ino - 1;
 
-    //inode->i_mapping->a_ops = &simplefs_aops;
+    inode->i_mapping->a_ops = &simplefs_aops;
     inode->i_op = &simplefs_inode_operations;
     if (S_ISDIR(s_inode->mode))
         inode->i_fop = &simplefs_dir_operations;
     else if (S_ISREG(s_inode->mode))
         inode->i_fop = &simplefs_reg_operations;
     else
-        inode->i_fop = NULL;
+        inode->i_fop = &empty_fops;
     inode->i_mode = s_inode->mode;
     inode->i_ino = ino;
     inode->i_private = s_inode;
