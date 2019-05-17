@@ -46,14 +46,19 @@ int simplefs_get_block(struct inode * inode, sector_t block,
     struct simplefs_inode *si = (struct simplefs_inode *)inode->i_private;
 
     //sb_bread(vsb, si->data_block_number);
-    map_bh(bh_result, vsb, si->data_block_number);
-    //bh_result->b_size = si->file_size; 
+    if (!create) {
+        map_bh(bh_result, vsb, si->data_block_number);
+        printk(KERN_ERR "ino:%lu block:%d create:%d %x\n", inode->i_ino, block, create, bh_result->b_data);
 
-    printk(KERN_ERR "ino:%lu block:%d create:%d %x\n", inode->i_ino, block, create, bh_result->b_data);
-
-    if (!create)
         return 0;
-    return 0;
+    }
+    //bh_result->b_size = si->file_size; 
+    if (create) {
+        map_bh(bh_result, vsb, si->data_block_number);
+        mark_inode_dirty(inode);
+        printk(KERN_ERR "ino:%lu block:%d create:%d %x\n", inode->i_ino, block, create, bh_result->b_data);
+        return 0;
+    }
 }
 static int simplefs_writepage(struct page *page, struct writeback_control *wbc)
 {
@@ -111,7 +116,7 @@ static const struct address_space_operations simplefs_aops = {
 struct super_operations simplefs_sops = {
 //    .alloc_inode = simplefs_alloc_inode,
     .destroy_inode = simplefs_destroy_inode,
-#if 0
+#if 1
     .write_inode = simplefs_write_inode,
 #endif
 };
@@ -418,6 +423,7 @@ int simplefs_write_inode (struct inode *inode,
 
     bh = sb_bread(sb, s_inode->inode_no);
     mark_buffer_dirty(bh);
+    sync_dirty_buffer(bh);
     return 0;
 }
 void simplefs_destroy_inode(struct inode *inode)
