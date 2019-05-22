@@ -452,7 +452,8 @@ struct inode *simplefs_iget(struct super_block *s, int ino)
         return ERR_PTR(-ENOMEM);
 
     bh = sb_bread(s, SIMPLEFS_INODESTORE_BLOCK_NUMBER);
-    s_inode = ((struct simplefs_inode *)bh->b_data) + ino - 1;
+    s_inode = kmem_cache_alloc(simplefs_inode_cachep, GFP_KERNEL);
+    memcpy(s_inode, ((struct simplefs_inode *)bh->b_data) + ino - 1, sizeof(struct simplefs_inode));
 
     inode->i_mapping->a_ops = &simplefs_aops;
     inode->i_op = &simplefs_inode_operations;
@@ -480,17 +481,13 @@ static int simplefs_fill_super(struct super_block *s, void *data, int silent)
     struct simplefs_super_block *sf;
     struct buffer_head *bh;
 
-    sf = kzalloc(sizeof(struct simplefs_super_block), GFP_KERNEL);
-    if (!sf)
-        goto err1;
-
     if (!sb_set_blocksize(s, SIMPLEFS_DEFAULT_BLOCK_SIZE))
         goto err2;
 
     bh = sb_bread(s, SIMPLEFS_SUPERBLOCK_BLOCK_NUMBER);
     if (bh == NULL)
         goto err2;
-    memcpy(sf, bh->b_data, sizeof(struct simplefs_super_block));
+    sf = (struct simplefs_super_block*)bh->b_data;
     if (sf->magic != SIMPLEFS_MAGIC) {
         printk(KERN_ERR "magic is wrong:0x%Lx\n", sf->magic);
         goto err3;
@@ -512,8 +509,6 @@ static int simplefs_fill_super(struct super_block *s, void *data, int silent)
 err3:
     brelse(bh);
 err2:
-    kfree(sf);
-err1:
     return -1;
 }
 
